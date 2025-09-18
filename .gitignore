@@ -13,8 +13,8 @@
 dump.rdb
 tmp/
 
-# ClickHouse data / temp (if local files)
-clickhouse/*
+# Ignore ClickHouse binary
+clickhouse
 
 # Preprocessed/generated configs (if not source)
 preprocessed_configs/*

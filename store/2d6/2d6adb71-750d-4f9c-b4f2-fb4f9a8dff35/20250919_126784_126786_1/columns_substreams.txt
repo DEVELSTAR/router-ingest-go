@@ -1,0 +1,20 @@
+columns substreams version: 1
+9 columns:
+1 substreams for column `ts`:
+	ts
+1 substreams for column `device_id`:
+	device_id
+1 substreams for column `endpoint`:
+	endpoint
+1 substreams for column `latency_ms`:
+	latency_ms
+1 substreams for column `loss_pct`:
+	loss_pct
+1 substreams for column `http_status`:
+	http_status
+1 substreams for column `isp`:
+	isp
+1 substreams for column `location`:
+	location
+1 substreams for column `uplink`:
+	uplink

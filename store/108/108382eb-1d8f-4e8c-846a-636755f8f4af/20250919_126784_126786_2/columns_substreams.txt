@@ -1,0 +1,25 @@
+columns substreams version: 1
+11 columns:
+1 substreams for column `ts_min`:
+	ts_min
+1 substreams for column `device_id`:
+	device_id
+1 substreams for column `endpoint`:
+	endpoint
+1 substreams for column `isp`:
+	isp
+1 substreams for column `location`:
+	location
+1 substreams for column `avg_latency`:
+	avg_latency
+1 substreams for column `max_latency`:
+	max_latency
+1 substreams for column `min_latency`:
+	min_latency
+1 substreams for column `packet_loss_count`:
+	packet_loss_count
+2 substreams for column `http_failures`:
+	http_failures.sparse.idx
+	http_failures
+1 substreams for column `samples`:
+	samples

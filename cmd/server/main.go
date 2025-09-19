@@ -1,111 +1,84 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/segmentio/kafka-go"
+	"router-ingest-go/config"
+	"router-ingest-go/internal/clickhouse"
+	"router-ingest-go/internal/kafka"
+	"router-ingest-go/internal/model"
 )
 
-type Metric struct {
-	DeviceID   string  `json:"device_id"`
-	Endpoint   string  `json:"endpoint"`
-	LatencyMs  int     `json:"latency_ms"`
-	LossPct    float32 `json:"loss_pct"`
-	HttpStatus int     `json:"http_status"`
-	Timestamp  string  `json:"ts"`
-	ISP        string  `json:"isp"`
-	Location   string  `json:"location"`
-	Uplink     string  `json:"uplink"`
-}
-
 func main() {
-	// Kafka writer (reuse)
-	writer := kafka.NewWriter(kafka.WriterConfig{
-		Brokers: []string{"localhost:9092"},
-		Topic:   "router-metrics",
-	})
-	defer writer.Close()
+	// Load config
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("❌ Config load error: %v", err)
+	}
 
-	// Kafka consumer
-	r := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{"localhost:9092"},
-		Topic:   "router-metrics",
-		GroupID: "ch-local-consumer",
-	})
+	// Ensure Kafka brokers are not empty
+	if len(cfg.KafkaBrokers) == 0 {
+		log.Fatal("❌ KAFKA_BROKERS is empty. Set it in your environment or .env")
+	}
 
-	go func() {
-		for {
-			m, err := r.ReadMessage(context.Background())
-			if err != nil {
-				log.Println("Error reading message:", err)
-				time.Sleep(time.Second)
-				continue
-			}
+	// Init ClickHouse tables
+	clickhouse.Init(cfg)
 
-			var metric Metric
-			if err := json.Unmarshal(m.Value, &metric); err != nil {
-				log.Println("JSON unmarshal error:", err)
-				continue
-			}
+	// Kafka producer & consumer
+	producer := kafka.NewProducer(cfg)
+	consumer := kafka.NewConsumer(cfg)
 
-			t, err := time.Parse(time.RFC3339, metric.Timestamp)
-			if err != nil {
-				// fallback for ClickHouse-style timestamp with space
-				t, err = time.Parse("2006-01-02 15:04:05", metric.Timestamp)
-				if err != nil {
-					log.Println("Invalid timestamp format:", metric.Timestamp, err)
-					continue
-				}
-			}
-			ts := t.Format("2006-01-02 15:04:05")
+	// Start consumer in background
+	go consumer.Start()
 
-
-			sql := fmt.Sprintf(`INSERT INTO router_metrics_raw 
-	(ts, device_id, endpoint, latency_ms, loss_pct, http_status, isp, location, uplink) 
-	VALUES ('%s','%s','%s',%d,%.2f,%d,'%s','%s','%s')`,
-				ts, metric.DeviceID, metric.Endpoint, metric.LatencyMs,
-				metric.LossPct, metric.HttpStatus, metric.ISP, metric.Location, metric.Uplink,
-			)
-
-			client := http.Client{Timeout: 5 * time.Second}
-			resp, err := client.Post("http://localhost:8123/", "text/plain", bytes.NewBuffer([]byte(sql)))
-			if err != nil {
-				log.Println("ClickHouse insert error:", err)
-				continue
-			}
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			log.Println("ClickHouse response:", string(body))
-		}
-	}()
-
-	// HTTP server
+	// HTTP endpoints
 	http.HandleFunc("/ingest", func(w http.ResponseWriter, r *http.Request) {
-		var m Metric
+		var m model.Metric
 		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		value, _ := json.Marshal(m)
-		err := writer.WriteMessages(context.Background(), kafka.Message{Value: value})
-		if err != nil {
-			log.Println("Kafka produce error:", err)
+		if err := producer.Write(m); err != nil {
 			http.Error(w, "failed to write to Kafka", http.StatusInternalServerError)
 			return
 		}
-		log.Println("Produced metric to Kafka:", m.DeviceID, m.Endpoint)
+
 		w.WriteHeader(http.StatusOK)
 	})
 
-	port := "8081"
-	log.Println("HTTP server running on port", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	server := &http.Server{Addr: ":" + cfg.HTTPPort}
+
+	// Graceful shutdown
+	go func() {
+		log.Printf("🚀 HTTP server running on port %s", cfg.HTTPPort)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("❌ HTTP server error: %v", err)
+		}
+	}()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	log.Println("⚙️ Shutting down...")
+
+	producer.Close()
+	consumer.Close()
+
+	if err := server.Close(); err != nil {
+		log.Println("⚠️ HTTP server close error:", err)
+	} else {
+		log.Println("✅ HTTP server stopped")
+	}
 }

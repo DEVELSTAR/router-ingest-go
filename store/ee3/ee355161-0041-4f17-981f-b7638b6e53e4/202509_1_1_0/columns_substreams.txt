@@ -8,7 +8,8 @@ columns substreams version: 1
 	endpoint
 1 substreams for column `latency_ms`:
 	latency_ms
-1 substreams for column `loss_pct`:
+2 substreams for column `loss_pct`:
+	loss_pct.sparse.idx
 	loss_pct
 1 substreams for column `http_status`:
 	http_status

@@ -2,30 +2,50 @@ package kafka
 
 import (
 	"context"
-	"time"
+	"encoding/json"
+	"log"
 
 	"github.com/segmentio/kafka-go"
+	"router-ingest-go/config"
+	"router-ingest-go/internal/model"
 )
 
 type Producer struct {
-	Writer *kafka.Writer
+	writer *kafka.Writer
 }
 
-func New(brokers, topic string) *Producer {
-	w := &kafka.Writer{
-		Addr:     kafka.TCP(brokers),
-		Topic:    topic,
-		Balancer: &kafka.LeastBytes{},
-	}
-	return &Producer{Writer: w}
-}
-
-func (p *Producer) Publish(ctx context.Context, key, value []byte) error {
-	return p.Writer.WriteMessages(ctx,
-		kafka.Message{
-			Key:   key,
-			Value: value,
-			Time:  time.Now().UTC(),
+func NewProducer(cfg *config.Config) *Producer {
+	return &Producer{
+		writer: &kafka.Writer{
+			Addr:     kafka.TCP(cfg.KafkaBrokers...),
+			Topic:    cfg.KafkaTopic,
+			Balancer: &kafka.LeastBytes{},
 		},
+	}
+}
+
+func (p *Producer) Write(m model.Metric) error {
+	value, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+
+	err = p.writer.WriteMessages(context.Background(),
+		kafka.Message{Value: value},
 	)
+	if err != nil {
+		log.Println("❌ Kafka write error:", err)
+		return err
+	}
+
+	log.Printf("✅ Produced metric: device=%s endpoint=%s", m.DeviceID, m.Endpoint)
+	return nil
+}
+
+func (p *Producer) Close() {
+	if err := p.writer.Close(); err != nil {
+		log.Println("⚠️ Kafka producer close error:", err)
+	} else {
+		log.Println("✅ Kafka producer closed")
+	}
 }

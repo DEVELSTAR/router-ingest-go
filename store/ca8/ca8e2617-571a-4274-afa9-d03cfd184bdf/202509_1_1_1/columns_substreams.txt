@@ -1,0 +1,17 @@
+columns substreams version: 1
+7 columns:
+1 substreams for column `ts_min`:
+	ts_min
+1 substreams for column `endpoint`:
+	endpoint
+1 substreams for column `location`:
+	location
+1 substreams for column `isp`:
+	isp
+1 substreams for column `sum_latency`:
+	sum_latency
+2 substreams for column `sum_loss`:
+	sum_loss.sparse.idx
+	sum_loss
+1 substreams for column `samples`:
+	samples

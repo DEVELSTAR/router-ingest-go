@@ -1,4 +1,4 @@
-ATTACH TABLE _ UUID '2d6adb71-750d-4f9c-b4f2-fb4f9a8dff35'
+ATTACH TABLE _ UUID 'ee355161-0041-4f17-981f-b7638b6e53e4'
 (
     `ts` DateTime,
     `device_id` String,
@@ -11,7 +11,7 @@ ATTACH TABLE _ UUID '2d6adb71-750d-4f9c-b4f2-fb4f9a8dff35'
     `uplink` String
 )
 ENGINE = MergeTree
-PARTITION BY toDate(ts)
-ORDER BY (ts, device_id)
+PARTITION BY toYYYYMM(ts)
+ORDER BY (ts, device_id, endpoint)
 TTL ts + toIntervalDay(7)
 SETTINGS index_granularity = 8192

@@ -1,14 +1,24 @@
-ATTACH MATERIALIZED VIEW _ UUID '1a4abea3-6e4e-44d7-b259-9f60357c0595' TO default.router_metrics_raw
+ATTACH MATERIALIZED VIEW _ UUID '3256675c-fb99-4c62-bee5-016ce9557d88' TO default.router_metrics_rollup
 (
-    `device_id` String,
+    `ts_min` DateTime,
     `endpoint` String,
-    `latency_ms` Int32,
-    `loss_pct` Float32,
-    `http_status` Int32,
-    `ts` DateTime,
-    `isp` String,
     `location` String,
-    `uplink` String
+    `isp` String,
+    `sum_latency` Int64,
+    `sum_loss` Float64,
+    `samples` UInt64
 )
-AS SELECT *
-FROM default.router_metrics_kafka
+AS SELECT
+    toStartOfMinute(ts) AS ts_min,
+    endpoint,
+    location,
+    isp,
+    sum(latency_ms) AS sum_latency,
+    sum(loss_pct) AS sum_loss,
+    count() AS samples
+FROM default.router_metrics_raw
+GROUP BY
+    ts_min,
+    endpoint,
+    location,
+    isp

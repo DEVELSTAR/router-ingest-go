@@ -1,9 +1,0 @@
-columns format version: 1
-7 columns:
-`ts_min` DateTime
-`endpoint` String
-`location` String
-`isp` String
-`sum_latency` Float32
-`sum_loss` Float32
-`samples` UInt32

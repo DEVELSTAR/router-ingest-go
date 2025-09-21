@@ -22,3 +22,8 @@ preprocessed_configs/*
 # User-specific / OS files
 *.DS_Store
 *.swp
+clickhouse
+server
+*.exe
+*.out
+*.bin

@@ -1,11 +1,15 @@
+// router-ingest-go/internal/api/handler.go
+
 package api
 
 import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
+
 	"router-ingest-go/internal/kafka"
-	"router-ingest-go/internal/models"
+	"router-ingest-go/internal/model"
 	redisClient "router-ingest-go/internal/redis"
 )
 
@@ -15,14 +19,17 @@ type Handler struct {
 }
 
 func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
-	var metric models.Metric
+	var metric model.Metric
 	if err := json.NewDecoder(r.Body).Decode(&metric); err != nil {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
 
-	// enrich with Redis metadata
-	meta, _ := h.Redis.GetMetadata(metric.DeviceID)
+	// Enrich with Redis metadata (with timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
+	defer cancel()
+	meta, _ := h.Redis.GetMetadata(ctx, metric.DeviceID)
+
 	if isp, ok := meta["isp"]; ok {
 		metric.ISP = isp
 	}
@@ -33,8 +40,10 @@ func (h *Handler) Ingest(w http.ResponseWriter, r *http.Request) {
 		metric.Uplink = uplink
 	}
 
-	data, _ := json.Marshal(metric)
-	err := h.Kafka.Publish(context.Background(), []byte(metric.DeviceID), data)
+	// Publish to Kafka with timeout
+	ctxKafka, cancelKafka := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancelKafka()
+	err := h.Kafka.Publish(ctxKafka, metric)
 	if err != nil {
 		http.Error(w, "failed to publish", http.StatusInternalServerError)
 		return

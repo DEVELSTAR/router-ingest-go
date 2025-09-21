@@ -5,6 +5,7 @@ go 1.25.1
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.40.3
 	github.com/caarlos0/env/v9 v9.0.0
+	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.14.0
 	github.com/segmentio/kafka-go v0.4.49
 )

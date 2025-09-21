@@ -1,9 +1,13 @@
+
+// router-ingest-go/internal/kafka/producer.go
+
 package kafka
 
 import (
 	"context"
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 	"router-ingest-go/config"
@@ -12,28 +16,35 @@ import (
 
 type Producer struct {
 	writer *kafka.Writer
+	topic  string
 }
 
 func NewProducer(cfg *config.Config) *Producer {
-	return &Producer{
-		writer: &kafka.Writer{
-			Addr:     kafka.TCP(cfg.KafkaBrokers...),
-			Topic:    cfg.KafkaTopic,
-			Balancer: &kafka.LeastBytes{},
-		},
+	w := &kafka.Writer{
+		Addr:     kafka.TCP(cfg.KafkaBrokers...),
+		Topic:    cfg.KafkaTopic,
+		Balancer: &kafka.Hash{},
+		Async:    false, // delivery guarantee
 	}
+	return &Producer{writer: w, topic: cfg.KafkaTopic}
 }
 
-func (p *Producer) Write(m model.Metric) error {
+func (p *Producer) Publish(ctx context.Context, m model.Metric) error {
 	value, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
 
-	err = p.writer.WriteMessages(context.Background(),
-		kafka.Message{Value: value},
-	)
-	if err != nil {
+	msg := kafka.Message{
+		Key:   []byte(m.DeviceID),
+		Value: value,
+	}
+
+	// timeout context
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := p.writer.WriteMessages(ctxTimeout, msg); err != nil {
 		log.Println("❌ Kafka write error:", err)
 		return err
 	}

@@ -1,139 +1,151 @@
+// router-ingest-go/internal/kafka/consumer.go
 package kafka
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"router-ingest-go/config"
 	"router-ingest-go/internal/model"
 )
 
 type Consumer struct {
-	reader      *kafka.Reader
-	sqlEndpoint string
-	client      *http.Client
-	batchSize   int
-	flushIntvl  time.Duration
-	buffer      []string
-	mu          sync.Mutex
+	reader     *kafka.Reader
+	batchSize  int
+	flushIntvl time.Duration
+	buffer     []model.Metric
+	mu         sync.Mutex
+	chConn     ch.Conn
+	closed     bool
 }
 
-func NewConsumer(cfg *config.Config) *Consumer {
+func NewConsumer(cfg *config.Config, chConn ch.Conn) *Consumer {
 	r := kafka.NewReader(kafka.ReaderConfig{
 		Brokers: cfg.KafkaBrokers,
 		Topic:   cfg.KafkaTopic,
 		GroupID: cfg.KafkaGroupID,
+		MinBytes: 10e3, // 10KB
+		MaxBytes: 10e6, // 10MB
 	})
 
-	sqlEndpoint := fmt.Sprintf("http://%s:%s/", cfg.CHAddr, cfg.CHHTTPPort)
-
 	return &Consumer{
-		reader:      r,
-		sqlEndpoint: sqlEndpoint,
-		client:      &http.Client{Timeout: 5 * time.Second},
-		batchSize:   cfg.BatchSize,
-		flushIntvl:  cfg.FlushInterval,
-		buffer:      make([]string, 0, cfg.BatchSize),
+		reader:     r,
+		batchSize:  cfg.BatchSize,
+		flushIntvl: cfg.FlushInterval,
+		buffer:     make([]model.Metric, 0, cfg.BatchSize),
+		chConn:     chConn,
 	}
 }
 
-func (c *Consumer) Start() {
-	// background ticker to flush every N seconds
+func (c *Consumer) Start(ctx context.Context) {
 	ticker := time.NewTicker(c.flushIntvl)
 	defer ticker.Stop()
 
-	go func() {
-		for range ticker.C {
-			c.flush()
-		}
-	}()
-
 	for {
-		m, err := c.reader.ReadMessage(context.Background())
-		if err != nil {
-			log.Println("❌ Kafka read error:", err)
-			time.Sleep(time.Second)
-			continue
-		}
+		select {
+		case <-ctx.Done():
+			log.Println("consumer: context canceled, flushing buffer and exiting")
+			c.flushBuffer(ctx)
+			return
 
-		var metric model.Metric
-		if err := json.Unmarshal(m.Value, &metric); err != nil {
-			log.Println("❌ JSON unmarshal error:", err)
-			continue
-		}
+		case <-ticker.C:
+			c.flushBuffer(ctx)
 
-		t, err := time.Parse(time.RFC3339, metric.Timestamp)
-		if err != nil {
-			t, err = time.Parse("2006-01-02 15:04:05", metric.Timestamp)
+		default:
+			// Read message with a timeout context to respect shutdown
+			m, err := c.reader.FetchMessage(ctx)
 			if err != nil {
-				log.Println("❌ Invalid timestamp:", metric.Timestamp, err)
+				if ctx.Err() != nil {
+					log.Println("consumer: shutting down reader")
+					return
+				}
+				// Non-blocking read failed, sleep to avoid tight loop
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-		}
-		ts := t.Format("2006-01-02 15:04:05")
 
-		row := fmt.Sprintf("('%s','%s','%s',%d,%.2f,%d,'%s','%s','%s')",
-			ts, metric.DeviceID, metric.Endpoint, metric.LatencyMs,
-			metric.LossPct, metric.HttpStatus, metric.ISP, metric.Location, metric.Uplink,
-		)
+			var metric model.Metric
+			if err := json.Unmarshal(m.Value, &metric); err != nil {
+				log.Println("❌ JSON unmarshal error:", err)
+				_ = c.reader.CommitMessages(ctx, m)
+				continue
+			}
 
-		// add row to buffer
-		c.mu.Lock()
-		c.buffer = append(c.buffer, row)
-		// if buffer is full, flush immediately
-		if len(c.buffer) >= c.batchSize {
-			go c.flush()
+			c.mu.Lock()
+			c.buffer = append(c.buffer, metric)
+			shouldFlush := len(c.buffer) >= c.batchSize
+			c.mu.Unlock()
+
+			if shouldFlush {
+				c.flushBuffer(ctx)
+			}
+
+			// Commit Kafka offset after processing
+			if err := c.reader.CommitMessages(ctx, m); err != nil {
+				log.Println("⚠️ Kafka commit error:", err)
+			}
 		}
-		c.mu.Unlock()
 	}
 }
 
-func (c *Consumer) flush() {
+// flushBuffer becomes context aware
+func (c *Consumer) flushBuffer(ctx context.Context) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if len(c.buffer) == 0 {
+		c.mu.Unlock()
 		return
 	}
+	batch := make([]model.Metric, len(c.buffer))
+	copy(batch, c.buffer)
+	c.buffer = c.buffer[:0]
+	c.mu.Unlock()
 
-	sql := fmt.Sprintf(`
-		INSERT INTO router_metrics_raw 
-		(ts, device_id, endpoint, latency_ms, loss_pct, http_status, isp, location, uplink) 
-		VALUES %s`, strings.Join(c.buffer, ","))
-
-	resp, err := c.client.Post(c.sqlEndpoint, "text/plain", bytes.NewBuffer([]byte(sql)))
+	insertSQL := `INSERT INTO router_metrics_raw (ts, device_id, endpoint, latency_ms, loss_pct, http_status, isp, location, uplink) VALUES`
+	batchWriter, err := c.chConn.PrepareBatch(ctx, insertSQL)
 	if err != nil {
-		log.Println("❌ ClickHouse batch insert error:", err)
-		c.buffer = nil
+		log.Println("❌ PrepareBatch error:", err)
 		return
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		log.Printf("❌ ClickHouse batch insert failed (%d): %s", resp.StatusCode, string(body))
-	} else {
-		log.Printf("✅ Flushed %d rows to ClickHouse", len(c.buffer))
+	sent := 0
+	for _, m := range batch {
+		t, err := time.Parse(time.RFC3339, m.Timestamp)
+		if err != nil {
+			log.Println("⚠️ invalid timestamp:", m.Timestamp, "using now")
+			t = time.Now().UTC()
+		}
+
+		if err := batchWriter.Append(
+			t, m.DeviceID, m.Endpoint, m.LatencyMs, m.LossPct,
+			m.HttpStatus, m.ISP, m.Location, m.Uplink,
+		); err != nil {
+			log.Println("⚠️ Append error:", err)
+			continue
+		}
+		sent++
 	}
 
-	// reset buffer
-	c.buffer = make([]string, 0, c.batchSize)
+	if err := batchWriter.Send(); err != nil {
+		log.Println("❌ ClickHouse batch insert error:", err)
+	} else {
+		log.Printf("✅ Flushed %d rows to ClickHouse", sent)
+	}
 }
 
 func (c *Consumer) Close() {
-	c.flush() // final flush before shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.flushBuffer(ctx)
+
 	if err := c.reader.Close(); err != nil {
 		log.Println("⚠️ Kafka consumer close error:", err)
 	} else {
 		log.Println("✅ Kafka consumer closed")
 	}
 }
+
